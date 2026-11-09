@@ -1,0 +1,728 @@
+#!/bin/zsh
+emulate -L zsh
+setopt pipefail no_nomatch extended_glob
+autoload -Uz is-at-least
+
+VERSION=0.1.0
+SHOW_SERIAL=0
+SHOW_HELP=0
+ALLOW_OPEN=1
+UI_LANG=""
+ABOUT_PANE_URL="x-apple.systempreferences:com.apple.SystemProfiler.AboutExtension"
+AI_MIN_FREE_GB=8
+
+typeset -A EN ZH REGION_EN REGION_ZH STOREFRONT_EN STOREFRONT_ZH COMPONENT_EN COMPONENT_ZH AIINPUT_EN AIINPUT_ZH
+
+EN=(
+  usage "Usage: mac-checkup [--show-serial] [--no-open] [--lang en|zh] [--version] [--help]
+
+Checks whether this Mac's parts are original, whether it is locked or managed by
+someone else, and whether Apple Intelligence can be turned on.
+
+  --show-serial  Print the full serial number (masked by default)
+  --no-open      Never open System Settings to refresh the repair record
+  --lang         Output language (default: follows the system language)"
+  title "Mac Checkup"
+  sec_device "Device"
+  sec_repair "Apple repair record (Parts & Service)"
+  sec_parts "Other parts"
+  sec_ai "Apple Intelligence"
+  sec_summary "Summary"
+  model "Model"
+  model_number "Model number"
+  sold_in "Sold in"
+  chip "Chip"
+  memory "Memory"
+  serial "Serial number"
+  macos "macOS"
+  unknown "unknown"
+  repair_unsupported "This Mac doesn't keep a repair record. It needs Apple silicon and macOS 26 or later."
+  repair_refreshing "No recent record in the system log. Opening System Settings › About in the background to refresh it…"
+  repair_missing "Couldn't read the repair record. Open System Settings › General › About once, then run this again."
+  repair_hint_settings "Check System Settings › General › About › Parts & Service for the Genuine / Unknown label."
+  repair_original "no repair record, original"
+  repair_repaired "replaced on %s"
+  repair_repaired_nodate "replaced"
+  repair_used "replaced with a used part (from another Mac)"
+  battery "Battery"
+  battery_detail "%s cycles, %s maximum capacity, condition %s"
+  battery_note "macOS doesn't label batteries as genuine; a normal condition and a cycle count that fits the Mac's age are good signs."
+  battery_none "no battery"
+  storage "Storage"
+  storage_detail "%s, S.M.A.R.T. %s"
+  list_sep ", "
+  storage_soldered "soldered to the logic board"
+  keyboard "Keyboard and trackpad"
+  keyboard_detail "made by %s"
+  display "Built-in display"
+  touchid "Touch ID"
+  touchid_working "working (a non-genuine or uncalibrated Touch ID board can't unlock the Mac)"
+  touchid_off "present but not set up"
+  sec_security "Locks and management"
+  activation_lock "Activation Lock"
+  activation_lock_off "off"
+  activation_lock_on "on: fine if it's your Apple Account; a seller must turn off Find My before handing the Mac over"
+  mdm "Device management (MDM)"
+  mdm_none "not enrolled"
+  mdm_dep "enrolled through Automated Device Enrollment: an organization owns this Mac and can manage or lock it"
+  mdm_enrolled "enrolled in MDM: an organization can manage this Mac"
+  mdm_bypass "/etc/hosts blocks Apple's enrollment servers, a common sign of an MDM bypass on a company-owned Mac"
+  profiles "Configuration profiles"
+  profiles_none "none"
+  profiles_device "device-wide"
+  profiles_user "this user"
+  profiles_note "Make sure you recognize every device-wide profile; they can control settings for all users."
+  apple_account "Apple Account"
+  apple_account_in "signed in on this user account"
+  apple_account_out "not signed in"
+  filevault "FileVault"
+  filevault_on "on"
+  filevault_off "off: the disk isn't encrypted"
+  sip "System Integrity Protection"
+  sip_on "on"
+  sip_off "off: tools that unlock region-locked features often turn it off"
+  ai_system "System verdict"
+  ai_system_yes "eligible (eligibilityd)"
+  ai_system_no "not eligible (eligibilityd)"
+  ai_estimated "This macOS doesn't expose its own verdict, so the checks below follow Apple's published rules."
+  ai_pass "passes"
+  ai_fail "fails"
+  ai_input_unknown "status %s"
+  ai_location_fail "Apple Intelligence isn't offered where this Mac is right now"
+  ai_match_fail "%s vs Siri %s; set both to the same language"
+  ai_chip "Chip"
+  ai_chip_ok "Apple silicon"
+  ai_chip_bad "needs Apple silicon (M1 or later)"
+  ai_os "macOS"
+  ai_os_bad "%s, needs macOS 15.1 or later"
+  ai_disk "Free space"
+  ai_disk_bad "%s GB free, needs about %s GB"
+  ai_disk_ok "%s GB free"
+  ai_device_region "Device region"
+  ai_device_region_cn "%s: Apple Intelligence doesn't currently work on Macs bought in China mainland, whatever the account or language"
+  ai_account "Apple Account region"
+  ai_account_none "not signed in to the App Store"
+  ai_account_cn "%s: blocked while you're in China mainland"
+  ai_lang_sys "System language"
+  ai_lang_siri "Siri language"
+  ai_lang_unsupported "%s isn't supported"
+  ai_lang_mismatch "Siri language doesn't match the system language; set both to the same supported language"
+  ai_lang_unset "not set"
+  verdict_ai_no "Apple Intelligence: not available on this Mac (✗ above)."
+  verdict_ai_maybe "Apple Intelligence: the hardware qualifies; fix the ! items above, then turn it on in System Settings › Apple Intelligence & Siri."
+  verdict_ai_yes "Apple Intelligence: available. Turn it on in System Settings › Apple Intelligence & Siri."
+  verdict_parts_ok "Parts: Apple's repair record shows no replaced parts."
+  verdict_parts_bad "Parts: Apple's repair record shows replaced parts (see above)."
+  verdict_parts_unknown "Parts: no Apple repair record available; only indirect checks above."
+  verdict_security_ok "Locks: no company management or MDM bypass found."
+  verdict_security_bad "Locks: this Mac is managed by an organization or has an MDM bypass (see above)."
+  verdict_store "For a definitive answer, ask an Apple Store or Apple Authorized Service Provider to look up the serial number."
+)
+
+ZH=(
+  usage "用法：mac-checkup [--show-serial] [--no-open] [--lang en|zh] [--version] [--help]
+
+检查这台 Mac 的部件是不是原装的、有没有被锁定或监管，以及能不能打开 Apple 智能。
+
+  --show-serial  显示完整序列号（默认打码）
+  --no-open      不自动打开系统设置来刷新维修记录
+  --lang         输出语言（默认跟随系统语言）"
+  title "Mac 体检"
+  sec_device "设备"
+  sec_repair "Apple 维修记录（部件与维修）"
+  sec_parts "其他部件"
+  sec_ai "Apple 智能"
+  sec_summary "结论"
+  model "机型"
+  model_number "型号"
+  sold_in "销售地区"
+  chip "芯片"
+  memory "内存"
+  serial "序列号"
+  macos "macOS"
+  unknown "未知"
+  repair_unsupported "这台 Mac 没有维修记录功能，需要 Apple 芯片和 macOS 26 或更新。"
+  repair_refreshing "系统日志里没有近期记录，正在后台打开「系统设置 › 关于本机」刷新…"
+  repair_missing "读不到维修记录。请先打开一次「系统设置 › 通用 › 关于本机」，再运行一次。"
+  repair_hint_settings "到「系统设置 › 通用 › 关于本机 › 部件与维修」看是「正品」还是「未知」。"
+  repair_original "没有维修记录，原装"
+  repair_repaired "%s 更换过"
+  repair_repaired_nodate "更换过"
+  repair_used "换成了二手件（来自另一台 Mac）"
+  battery "电池"
+  battery_detail "循环 %s 次，最大容量 %s，状态 %s"
+  battery_note "macOS 不标记电池是否原装；状态正常、循环次数和使用年限对得上，是好迹象。"
+  battery_none "没有电池"
+  storage "硬盘"
+  storage_detail "%s，S.M.A.R.T. %s"
+  list_sep "，"
+  storage_soldered "焊在主板上"
+  keyboard "键盘和触控板"
+  keyboard_detail "制造商 %s"
+  display "内建显示器"
+  touchid "Touch ID"
+  touchid_working "工作正常（非原装或未校准的 Touch ID 板无法解锁）"
+  touchid_off "有硬件，但没有录入指纹"
+  sec_security "锁和监管"
+  activation_lock "激活锁"
+  activation_lock_off "关闭"
+  activation_lock_on "开启：如果是你自己的 Apple 账号没问题；卖家交机前必须先关闭「查找」"
+  mdm "设备监管（MDM）"
+  mdm_none "没有注册"
+  mdm_dep "已通过自动设备注册（ADE）登记：这台 Mac 属于某个机构，对方可以远程管理或锁定"
+  mdm_enrolled "已注册 MDM：某个机构可以管理这台 Mac"
+  mdm_bypass "/etc/hosts 屏蔽了 Apple 的注册服务器，这是公司机绕过 MDM 的常见迹象"
+  profiles "配置描述文件"
+  profiles_none "没有"
+  profiles_device "全设备"
+  profiles_user "当前用户"
+  profiles_note "确认每个全设备描述文件你都认识，它们能控制所有用户的设置。"
+  apple_account "Apple 账号"
+  apple_account_in "当前用户已登录"
+  apple_account_out "未登录"
+  filevault "FileVault"
+  filevault_on "开启"
+  filevault_off "关闭：磁盘没有加密"
+  sip "系统完整性保护（SIP）"
+  sip_on "开启"
+  sip_off "关闭：解锁地区限制功能的工具常常会关掉它"
+  ai_system "系统判定"
+  ai_system_yes "符合条件（eligibilityd）"
+  ai_system_no "不符合条件（eligibilityd）"
+  ai_estimated "这个版本的 macOS 没有提供系统判定，下面按 Apple 公布的规则推算。"
+  ai_pass "通过"
+  ai_fail "未通过"
+  ai_input_unknown "状态 %s"
+  ai_location_fail "这台 Mac 当前所在的地区不提供 Apple 智能"
+  ai_match_fail "系统 %s，Siri %s；请设成同一种语言"
+  ai_chip "芯片"
+  ai_chip_ok "Apple 芯片"
+  ai_chip_bad "需要 Apple 芯片（M1 或更新）"
+  ai_os "macOS"
+  ai_os_bad "%s，需要 macOS 15.1 或更新"
+  ai_disk "可用空间"
+  ai_disk_bad "剩余 %s GB，需要约 %s GB"
+  ai_disk_ok "剩余 %s GB"
+  ai_device_region "设备地区"
+  ai_device_region_cn "%s：在中国大陆购买的 Mac 目前无法使用 Apple 智能，改账号或语言都没用"
+  ai_account "Apple 账号地区"
+  ai_account_none "没有登录 App Store"
+  ai_account_cn "%s：人在中国大陆时无法使用"
+  ai_lang_sys "系统语言"
+  ai_lang_siri "Siri 语言"
+  ai_lang_unsupported "不支持 %s"
+  ai_lang_mismatch "Siri 语言和系统语言不一致，请把两者设成同一种支持的语言"
+  ai_lang_unset "未设置"
+  verdict_ai_no "Apple 智能：这台 Mac 用不了（见上面的 ✗）。"
+  verdict_ai_maybe "Apple 智能：硬件符合；处理好上面的 ! 项后，到「系统设置 › Apple 智能与 Siri」打开。"
+  verdict_ai_yes "Apple 智能：可以使用，到「系统设置 › Apple 智能与 Siri」打开。"
+  verdict_parts_ok "部件：Apple 维修记录显示没有更换过部件。"
+  verdict_parts_bad "部件：Apple 维修记录显示有部件被更换过（见上面）。"
+  verdict_parts_unknown "部件：没有 Apple 维修记录可读，上面只是间接判断。"
+  verdict_security_ok "锁和监管：没有发现机构监管或 MDM 绕过。"
+  verdict_security_bad "锁和监管：这台 Mac 受机构监管或被绕过了 MDM（见上面）。"
+  verdict_store "想要百分之百确认，请带序列号到 Apple Store 或授权服务提供商查询官方维修记录。"
+)
+
+REGION_EN=(
+  "LL/A" "United States" "CH/A" "China mainland" "ZP/A" "Hong Kong / Macau" "TA/A" "Taiwan"
+  "J/A" "Japan" "KH/A" "South Korea" "ZA/A" "Singapore / Malaysia" "X/A" "Australia / New Zealand"
+  "B/A" "United Kingdom / Ireland" "C/A" "Canada" "HN/A" "India" "D/A" "Germany"
+  "FN/A" "France" "Y/A" "Spain" "T/A" "Italy" "E/A" "Mexico" "BZ/A" "Brazil"
+  "RU/A" "Russia" "TH/A" "Thailand" "AB/A" "Middle East"
+)
+REGION_ZH=(
+  "LL/A" "美国" "CH/A" "中国大陆" "ZP/A" "香港 / 澳门" "TA/A" "台湾"
+  "J/A" "日本" "KH/A" "韩国" "ZA/A" "新加坡 / 马来西亚" "X/A" "澳大利亚 / 新西兰"
+  "B/A" "英国 / 爱尔兰" "C/A" "加拿大" "HN/A" "印度" "D/A" "德国"
+  "FN/A" "法国" "Y/A" "西班牙" "T/A" "意大利" "E/A" "墨西哥" "BZ/A" "巴西"
+  "RU/A" "俄罗斯" "TH/A" "泰国" "AB/A" "中东"
+)
+STOREFRONT_EN=(
+  143441 "United States" 143465 "China mainland" 143463 "Hong Kong" 143515 "Macau" 143470 "Taiwan"
+  143462 "Japan" 143466 "South Korea" 143464 "Singapore" 143473 "Malaysia" 143460 "Australia"
+  143444 "United Kingdom" 143455 "Canada" 143467 "India" 143443 "Germany" 143442 "France"
+  143454 "Spain" 143450 "Italy" 143468 "Mexico" 143503 "Brazil" 143469 "Russia" 143475 "Thailand"
+)
+STOREFRONT_ZH=(
+  143441 "美国" 143465 "中国大陆" 143463 "香港" 143515 "澳门" 143470 "台湾"
+  143462 "日本" 143466 "韩国" 143464 "新加坡" 143473 "马来西亚" 143460 "澳大利亚"
+  143444 "英国" 143455 "加拿大" 143467 "印度" 143443 "德国" 143442 "法国"
+  143454 "西班牙" 143450 "意大利" 143468 "墨西哥" 143503 "巴西" 143469 "俄罗斯" 143475 "泰国"
+)
+AIINPUT_EN=(
+  DEVICE_CLASS "Device model" GENERATIVE_MODEL_SYSTEM "On-device models" DEVICE_REGION_CODE "Device region"
+  COUNTRY_LOCATION "Current location" COUNTRY_BILLING "Apple Account billing country" DEVICE_LANGUAGE "System language"
+  SIRI_LANGUAGE "Siri language" DEVICE_AND_SIRI_LANGUAGE_MATCH "System and Siri language match"
+  EXTERNAL_BOOT_DRIVE "Started from the internal disk" SHARED_IPAD "Not a shared device"
+)
+AIINPUT_ZH=(
+  DEVICE_CLASS "机型" GENERATIVE_MODEL_SYSTEM "端侧模型" DEVICE_REGION_CODE "设备地区"
+  COUNTRY_LOCATION "当前所在地" COUNTRY_BILLING "Apple 账号付款地区" DEVICE_LANGUAGE "系统语言"
+  SIRI_LANGUAGE "Siri 语言" DEVICE_AND_SIRI_LANGUAGE_MATCH "系统语言和 Siri 语言一致"
+  EXTERNAL_BOOT_DRIVE "从内置磁盘启动" SHARED_IPAD "不是共享设备"
+)
+COMPONENT_EN=(LogicBoard "Logic board" Display "Display" TouchID "Touch ID" LidAngleSensor "Lid angle sensor" Battery "Battery" Camera "Camera" TopCase "Top case")
+COMPONENT_ZH=(LogicBoard "主板" Display "屏幕" TouchID "Touch ID" LidAngleSensor "屏幕开合角度传感器" Battery "电池" Camera "摄像头" TopCase "顶壳（键盘）")
+
+t() {
+  if [[ $UI_LANG == zh && -n ${ZH[$1]} ]]; then
+    print -rn -- "${ZH[$1]}"
+  else
+    print -rn -- "${EN[$1]}"
+  fi
+}
+
+lookup() {
+  local zh_ref="${1}_ZH[$2]" en_ref="${1}_EN[$2]"
+  if [[ $UI_LANG == zh && -n ${(P)zh_ref} ]]; then
+    print -rn -- "${(P)zh_ref}"
+  elif [[ -n ${(P)en_ref} ]]; then
+    print -rn -- "${(P)en_ref}"
+  else
+    print -rn -- "$2"
+  fi
+}
+
+if [[ -t 1 && -z $NO_COLOR ]]; then
+  C_GREEN=$'\e[32m' C_YELLOW=$'\e[33m' C_RED=$'\e[31m' C_DIM=$'\e[2m' C_BOLD=$'\e[1m' C_RESET=$'\e[0m'
+else
+  C_GREEN="" C_YELLOW="" C_RED="" C_DIM="" C_BOLD="" C_RESET=""
+fi
+
+heading() { print -r -- ""; print -r -- "${C_BOLD}$1${C_RESET}"; }
+
+row() {
+  local mark
+  case $1 in
+    ok) mark="${C_GREEN}✓${C_RESET}" ;;
+    warn) mark="${C_YELLOW}!${C_RESET}" ;;
+    bad) mark="${C_RED}✗${C_RESET}" ;;
+    *) mark="${C_DIM}·${C_RESET}" ;;
+  esac
+  if [[ -n $3 ]]; then
+    print -r -- "  $mark $2: $3"
+  else
+    print -r -- "  $mark $2"
+  fi
+}
+
+note() { print -r -- "    ${C_DIM}$1${C_RESET}"; }
+
+field() {
+  print -r -- "$1" | awk -v key="$2" '
+    { line = $0; sub(/^[ \t]+/, "", line) }
+    index(line, key ": ") == 1 { print substr(line, length(key) + 3); exit }
+  '
+}
+
+ioreg_platform_string() {
+  local raw
+  raw=$(ioreg -rd1 -c IOPlatformExpertDevice | awk -v key="\"$1\"" '$1 == key { sub(/^[^=]*= /, ""); print; exit }')
+  raw=${raw#<}
+  raw=${raw%>}
+  if [[ $raw == \"*\" ]]; then
+    print -rn -- "${raw//\"/}"
+  elif [[ -n $raw ]]; then
+    print -rn -- "$raw" | xxd -r -p | tr -d '\0'
+  fi
+}
+
+mask_serial() {
+  local serial=$1
+  if (( SHOW_SERIAL )) || (( ${#serial} < 8 )); then
+    print -rn -- "$serial"
+  else
+    print -rn -- "${serial[1,4]}••••${serial[-2,-1]}"
+  fi
+}
+
+read_repair_history() {
+  /usr/bin/log show --last "$1" --style compact \
+    --predicate 'subsystem == "com.apple.corerepair" AND eventMessage CONTAINS "repairHistoryForUI"' 2>/dev/null |
+    awk '
+      /repairHistoryForUI:\{/ { buffer = ""; capturing = 1; next }
+      capturing && /^\}/ { capturing = 0; latest = buffer; next }
+      capturing { buffer = buffer $0 "\n" }
+      END { printf "%s", latest }
+    '
+}
+
+refresh_repair_history() {
+  local settings_was_running=0 attempt history
+  pgrep -xq "System Settings" && settings_was_running=1
+  open -g "$ABOUT_PANE_URL" 2>/dev/null || return 1
+  for attempt in {1..10}; do
+    sleep 2
+    history=$(read_repair_history 2m)
+    [[ -n $history ]] && break
+  done
+  (( settings_was_running )) || osascript -e 'tell application "System Settings" to quit' >/dev/null 2>&1
+  print -rn -- "$history"
+}
+
+normalize_language() {
+  local tag=$1
+  case $tag in
+    zh-Hans*|zh-CN|zh-SG) print -rn -- "zh-CN" ;;
+    zh-Hant-HK|zh-Hant-MO|zh-HK|zh-MO|yue*) print -rn -- "zh-HK" ;;
+    nb*|no*) print -rn -- "nb" ;;
+    zh-Hant*|zh-TW) print -rn -- "zh-TW" ;;
+    *) print -rn -- "${tag%%[-_]*}" ;;
+  esac
+}
+
+language_supported() {
+  case $(normalize_language "$1") in
+    en|da|nl|fr|de|it|nb|pt|es|sv|tr|vi|zh-CN|zh-TW|zh-HK|ja|ko) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+while (( $# )); do
+  case $1 in
+    --show-serial) SHOW_SERIAL=1 ;;
+    --no-open) ALLOW_OPEN=0 ;;
+    --lang) shift; UI_LANG=$1 ;;
+    --lang=*) UI_LANG=${1#--lang=} ;;
+    --version) print -r -- "mac-checkup $VERSION"; exit 0 ;;
+    -h|--help) SHOW_HELP=1 ;;
+    *) print -u2 -r -- "mac-checkup: unknown option $1"; exit 2 ;;
+  esac
+  shift
+done
+
+if [[ $(uname -s) != Darwin ]]; then
+  print -u2 -r -- "mac-checkup only runs on macOS."
+  exit 1
+fi
+
+primary_language=$(defaults read -g AppleLanguages 2>/dev/null | sed -n '2p' | tr -d ' ",')
+if [[ -z $UI_LANG ]]; then
+  [[ $primary_language == zh* ]] && UI_LANG=zh || UI_LANG=en
+fi
+
+if (( SHOW_HELP )); then
+  t usage
+  print
+  exit 0
+fi
+
+hardware_info=$(system_profiler SPHardwareDataType 2>/dev/null)
+power_info=$(system_profiler SPPowerDataType 2>/dev/null)
+storage_info=$(system_profiler SPNVMeDataType 2>/dev/null)
+[[ -z $storage_info ]] && storage_info=$(system_profiler SPSerialATADataType 2>/dev/null)
+keyboard_info=$(system_profiler SPSPIDataType 2>/dev/null)
+display_info=$(system_profiler SPDisplaysDataType 2>/dev/null)
+
+model_name=$(field "$hardware_info" "Model Name")
+model_identifier=$(field "$hardware_info" "Model Identifier")
+chip=$(field "$hardware_info" "Chip")
+[[ -z $chip ]] && chip=$(field "$hardware_info" "Processor Name")
+memory=$(field "$hardware_info" "Memory")
+serial=$(field "$hardware_info" "Serial Number (system)")
+macos_version=$(sw_vers -productVersion)
+macos_build=$(sw_vers -buildVersion)
+is_apple_silicon=$(sysctl -n hw.optional.arm64 2>/dev/null || print 0)
+region_code=$(ioreg_platform_string region-info)
+model_base=$(ioreg_platform_string model-number)
+model_number=$(field "$hardware_info" "Model Number")
+[[ -z $model_number && -n $model_base ]] && model_number="$model_base$region_code"
+
+print -r -- "${C_BOLD}$(t title)${C_RESET} ${C_DIM}v$VERSION${C_RESET}"
+
+heading "$(t sec_device)"
+row info "$(t model)" "$model_name ($model_identifier)"
+row info "$(t model_number)" "${model_number:-$(t unknown)}"
+if [[ -n $region_code ]]; then
+  row info "$(t sold_in)" "$(lookup REGION "$region_code") ($region_code)"
+else
+  row info "$(t sold_in)" "$(t unknown)"
+fi
+row info "$(t chip)" "$chip"
+row info "$(t memory)" "$memory"
+row info "$(t serial)" "$(mask_serial "$serial")"
+row info "$(t macos)" "$macos_version ($macos_build)"
+
+heading "$(t sec_repair)"
+parts_verdict=unknown
+if [[ $is_apple_silicon == 1 ]] && is-at-least 26 "$macos_version"; then
+  repair_history=$(read_repair_history 30d)
+  if [[ -z $repair_history ]] && (( ALLOW_OPEN )); then
+    note "$(t repair_refreshing)"
+    repair_history=$(refresh_repair_history)
+  fi
+  if [[ -z $repair_history ]]; then
+    row warn "$(t sec_repair)" "$(t repair_missing)"
+  else
+    parts_verdict=ok
+    for history_line in ${(f)repair_history}; do
+      component=$(print -r -- "$history_line" | sed -nE 's/.*componentName:([^:]+):.*/\1/p')
+      [[ -z $component ]] && continue
+      is_repaired=$(print -r -- "$history_line" | sed -nE 's/.*isRepaired:([0-9]+):.*/\1/p')
+      is_used=$(print -r -- "$history_line" | sed -nE 's/.*isUsed:([0-9]+):.*/\1/p')
+      repair_date=$(print -r -- "$history_line" | sed -nE 's/.*repairDate:(.*):\].*/\1/p')
+      component_label=$(lookup COMPONENT "$component")
+      if [[ $is_used == 1 ]]; then
+        row bad "$component_label" "$(t repair_used)"
+        parts_verdict=bad
+      elif [[ $is_repaired == 1 ]]; then
+        if [[ -n $repair_date && $repair_date != "(null)" ]]; then
+          row warn "$component_label" "$(printf "$(t repair_repaired)" "${repair_date%% *}")"
+        else
+          row warn "$component_label" "$(t repair_repaired_nodate)"
+        fi
+        parts_verdict=bad
+      else
+        row ok "$component_label" "$(t repair_original)"
+      fi
+    done
+    [[ $parts_verdict == bad ]] && note "$(t repair_hint_settings)"
+  fi
+else
+  note "$(t repair_unsupported)"
+fi
+
+heading "$(t sec_parts)"
+cycle_count=$(field "$power_info" "Cycle Count")
+if [[ -n $cycle_count ]]; then
+  battery_condition=$(field "$power_info" "Condition")
+  battery_capacity=$(field "$power_info" "Maximum Capacity")
+  battery_status=ok
+  [[ $battery_condition != Normal ]] && battery_status=warn
+  row $battery_status "$(t battery)" "$(printf "$(t battery_detail)" "$cycle_count" "${battery_capacity:-?}" "${battery_condition:-?}")"
+  note "$(t battery_note)"
+else
+  row info "$(t battery)" "$(t battery_none)"
+fi
+
+storage_model=$(field "$storage_info" "Model")
+if [[ -n $storage_model ]]; then
+  smart_status=$(field "$storage_info" "S.M.A.R.T. status")
+  storage_status=ok
+  [[ $storage_model != APPLE* || $smart_status != Verified ]] && storage_status=warn
+  storage_text=$(printf "$(t storage_detail)" "$storage_model" "${smart_status:-?}")
+  [[ $(field "$storage_info" "Detachable Drive") == No && $is_apple_silicon == 1 ]] && storage_text="$storage_text$(t list_sep)$(t storage_soldered)"
+  row $storage_status "$(t storage)" "$storage_text"
+fi
+
+keyboard_vendor=$(print -r -- "$keyboard_info" | awk '/Internal Keyboard/ { found = 1 } found && /Manufacturer:/ { sub(/^[^:]*: /, ""); print; exit }')
+if [[ -n $keyboard_vendor ]]; then
+  keyboard_status=ok
+  [[ $keyboard_vendor != Apple* ]] && keyboard_status=warn
+  row $keyboard_status "$(t keyboard)" "$(printf "$(t keyboard_detail)" "$keyboard_vendor")"
+fi
+
+builtin_display=$(field "$display_info" "Display Type")
+[[ -n $builtin_display ]] && row info "$(t display)" "$builtin_display"
+
+touch_id_status=$(bioutil -rs 2>/dev/null)
+if [[ $touch_id_status == *"Biometrics functionality: 1"* ]]; then
+  if [[ $touch_id_status == *"Biometrics for unlock: 1"* ]]; then
+    row ok "$(t touchid)" "$(t touchid_working)"
+  else
+    row info "$(t touchid)" "$(t touchid_off)"
+  fi
+fi
+
+heading "$(t sec_security)"
+security_blocked=0
+
+activation_lock=$(field "$hardware_info" "Activation Lock Status")
+case $activation_lock in
+  Disabled) row ok "$(t activation_lock)" "$(t activation_lock_off)" ;;
+  Enabled) row warn "$(t activation_lock)" "$(t activation_lock_on)" ;;
+esac
+
+enrollment_status=$(profiles status -type enrollment 2>/dev/null)
+if [[ $enrollment_status == *"Enrolled via DEP: Yes"* ]]; then
+  row bad "$(t mdm)" "$(t mdm_dep)"
+  security_blocked=1
+elif [[ $enrollment_status == *"MDM enrollment: Yes"* ]]; then
+  row bad "$(t mdm)" "$(t mdm_enrolled)"
+  security_blocked=1
+elif [[ -n $enrollment_status ]]; then
+  row ok "$(t mdm)" "$(t mdm_none)"
+fi
+if grep -qiE '^[^#]*(deviceenrollment|mdmenrollment|iprofiles|acmdm)\.apple\.com' /etc/hosts 2>/dev/null; then
+  row bad "$(t mdm)" "$(t mdm_bypass)"
+  security_blocked=1
+fi
+
+installed_profiles=$(system_profiler SPConfigurationProfileDataType 2>/dev/null | awk '
+  function flush() { if (name != "") print scope "|" name "|" source; name = ""; source = "" }
+  /^    User .*Configuration Profiles:$/ { flush(); scope = "user"; next }
+  /^    Device Configuration Profiles:$/ { flush(); scope = "device"; next }
+  scope != "" && /^        [^ ].*:$/ { flush(); name = $0; sub(/^ +/, "", name); sub(/:$/, "", name); next }
+  name != "" && /^          Source: / { source = $0; sub(/^ *Source: /, "", source) }
+  END { flush() }
+')
+if [[ -z $installed_profiles ]]; then
+  row ok "$(t profiles)" "$(t profiles_none)"
+else
+  has_device_profile=0
+  for profile_line in ${(f)installed_profiles}; do
+    profile_scope=${profile_line%%|*}
+    profile_rest=${profile_line#*|}
+    profile_name=${profile_rest%%|*}
+    profile_source=${profile_rest#*|}
+    profile_text="$profile_name"
+    [[ -n $profile_source ]] && profile_text="$profile_text ($profile_source)"
+    if [[ $profile_scope == device ]]; then
+      row warn "$(t profiles) · $(t profiles_device)" "$profile_text"
+      has_device_profile=1
+    else
+      row info "$(t profiles) · $(t profiles_user)" "$profile_text"
+    fi
+  done
+  (( has_device_profile )) && note "$(t profiles_note)"
+fi
+
+if [[ -n $(print -l ~/Library/Application\ Support/iCloud/Accounts/<->(N)) ]] || defaults read MobileMeAccounts Accounts 2>/dev/null | grep -q AccountID; then
+  row info "$(t apple_account)" "$(t apple_account_in)"
+else
+  row info "$(t apple_account)" "$(t apple_account_out)"
+fi
+
+if [[ $(fdesetup status 2>/dev/null) == *"FileVault is On"* ]]; then
+  row ok "$(t filevault)" "$(t filevault_on)"
+else
+  row warn "$(t filevault)" "$(t filevault_off)"
+fi
+
+if [[ $(csrutil status 2>/dev/null) == *"enabled."* ]]; then
+  row ok "$(t sip)" "$(t sip_on)"
+else
+  row warn "$(t sip)" "$(t sip_off)"
+fi
+
+heading "$(t sec_ai)"
+ai_blocked=0
+ai_warnings=0
+region_label="$(lookup REGION "$region_code") ($region_code)"
+siri_language=$(defaults read com.apple.assistant.backedup "Session Language" 2>/dev/null)
+storefront_id=$(defaults read com.apple.itunesstored AccountsNotificationPlugin.ActiveStorefrontIdentifier 2>/dev/null)
+storefront_id=${storefront_id%%-*}
+eligibility_file=/private/var/db/eligibilityd/eligibility.plist
+ai_domain=OS_ELIGIBILITY_DOMAIN_GREYMATTER
+ai_answer=$(plutil -extract "$ai_domain.os_eligibility_answer_t" raw -o - "$eligibility_file" 2>/dev/null)
+
+if [[ -n $ai_answer ]]; then
+  typeset -A ai_inputs
+  ai_inputs=($(plutil -extract "$ai_domain.status" json -o - "$eligibility_file" 2>/dev/null |
+    tr ',{}' '\n\n\n' | sed -nE 's/^"OS_ELIGIBILITY_INPUT_([A-Z_]+)":([0-9]+)$/\1 \2/p'))
+  if [[ $ai_answer == 4 ]]; then
+    row ok "$(t ai_system)" "$(t ai_system_yes)"
+  else
+    row bad "$(t ai_system)" "$(t ai_system_no)"
+    ai_blocked=1
+  fi
+  typeset -U ai_input_order
+  ai_input_order=(DEVICE_CLASS GENERATIVE_MODEL_SYSTEM DEVICE_REGION_CODE COUNTRY_LOCATION COUNTRY_BILLING
+    DEVICE_LANGUAGE SIRI_LANGUAGE DEVICE_AND_SIRI_LANGUAGE_MATCH EXTERNAL_BOOT_DRIVE SHARED_IPAD ${(ko)ai_inputs})
+  for ai_input in $ai_input_order; do
+    input_value=${ai_inputs[$ai_input]}
+    [[ -z $input_value ]] && continue
+    input_label=$(lookup AIINPUT "$ai_input")
+    case $ai_input in
+      DEVICE_REGION_CODE) input_detail=$region_label ;;
+      COUNTRY_BILLING) input_detail=$([[ -n $storefront_id ]] && lookup STOREFRONT "$storefront_id") ;;
+      DEVICE_LANGUAGE) input_detail=$primary_language ;;
+      SIRI_LANGUAGE) input_detail=$siri_language ;;
+      DEVICE_CLASS) input_detail=$model_identifier ;;
+      *) input_detail="" ;;
+    esac
+    case $input_value in
+      3) row ok "$input_label" "${input_detail:-$(t ai_pass)}" ;;
+      2)
+        case $ai_input in
+          DEVICE_REGION_CODE) [[ $region_code == CH/A ]] && input_detail=$(printf "$(t ai_device_region_cn)" "$region_label") ;;
+          COUNTRY_LOCATION) input_detail=$(t ai_location_fail) ;;
+          DEVICE_AND_SIRI_LANGUAGE_MATCH) input_detail=$(printf "$(t ai_match_fail)" "$primary_language" "${siri_language:-?}") ;;
+        esac
+        row bad "$input_label" "${input_detail:-$(t ai_fail)}"
+        ;;
+      *) row info "$input_label" "$(printf "$(t ai_input_unknown)" "$input_value")" ;;
+    esac
+  done
+else
+  note "$(t ai_estimated)"
+  if [[ $is_apple_silicon == 1 ]]; then
+    row ok "$(t ai_chip)" "$(t ai_chip_ok)"
+  else
+    row bad "$(t ai_chip)" "$(t ai_chip_bad)"
+    ai_blocked=1
+  fi
+
+  if is-at-least 15.1 "$macos_version"; then
+    row ok "$(t ai_os)" "$macos_version"
+  else
+    row bad "$(t ai_os)" "$(printf "$(t ai_os_bad)" "$macos_version")"
+    ai_blocked=1
+  fi
+
+  if [[ $region_code == CH/A ]]; then
+    row bad "$(t ai_device_region)" "$(printf "$(t ai_device_region_cn)" "$region_label")"
+    ai_blocked=1
+  elif [[ -n $region_code ]]; then
+    row ok "$(t ai_device_region)" "$region_label"
+  else
+    row warn "$(t ai_device_region)" "$(t unknown)"
+  fi
+
+  if [[ -z $storefront_id ]]; then
+    row info "$(t ai_account)" "$(t ai_account_none)"
+  elif [[ $storefront_id == 143465 && $region_code != CH/A ]]; then
+    row warn "$(t ai_account)" "$(printf "$(t ai_account_cn)" "$(lookup STOREFRONT 143465)")"
+    ai_warnings=1
+  else
+    row info "$(t ai_account)" "$(lookup STOREFRONT "$storefront_id")"
+  fi
+
+  if language_supported "$primary_language"; then
+    row ok "$(t ai_lang_sys)" "$primary_language"
+  else
+    row warn "$(t ai_lang_sys)" "$(printf "$(t ai_lang_unsupported)" "$primary_language")"
+    ai_warnings=1
+  fi
+  if [[ -z $siri_language ]]; then
+    row info "$(t ai_lang_siri)" "$(t ai_lang_unset)"
+  elif ! language_supported "$siri_language"; then
+    row warn "$(t ai_lang_siri)" "$(printf "$(t ai_lang_unsupported)" "$siri_language")"
+    ai_warnings=1
+  elif [[ $(normalize_language "$siri_language") != $(normalize_language "$primary_language") ]]; then
+    row warn "$(t ai_lang_siri)" "$siri_language"
+    note "$(t ai_lang_mismatch)"
+    ai_warnings=1
+  else
+    row ok "$(t ai_lang_siri)" "$siri_language"
+  fi
+fi
+
+free_gb=$(( $(df -k / | awk 'NR == 2 { print $4 }') / 1024 / 1024 ))
+if (( free_gb >= AI_MIN_FREE_GB )); then
+  row ok "$(t ai_disk)" "$(printf "$(t ai_disk_ok)" "$free_gb")"
+else
+  row warn "$(t ai_disk)" "$(printf "$(t ai_disk_bad)" "$free_gb" "$AI_MIN_FREE_GB")"
+  ai_warnings=1
+fi
+
+heading "$(t sec_summary)"
+case $parts_verdict in
+  ok) row ok "$(t verdict_parts_ok)" ;;
+  bad) row bad "$(t verdict_parts_bad)" ;;
+  *) row warn "$(t verdict_parts_unknown)" ;;
+esac
+if (( security_blocked )); then
+  row bad "$(t verdict_security_bad)"
+else
+  row ok "$(t verdict_security_ok)"
+fi
+if (( ai_blocked )); then
+  row bad "$(t verdict_ai_no)"
+elif (( ai_warnings )); then
+  row warn "$(t verdict_ai_maybe)"
+else
+  row ok "$(t verdict_ai_yes)"
+fi
+note "$(t verdict_store)"

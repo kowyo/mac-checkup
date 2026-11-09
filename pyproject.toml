@@ -1,0 +1,25 @@
+[project]
+name = "mac-checkup"
+version = "0.1.0"
+description = "Check whether a Mac's parts are original and whether Apple Intelligence can be turned on"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "Huang Zifeng", email = "kowyo@outlook.com" }]
+classifiers = ["Operating System :: MacOS"]
+
+[project.urls]
+Repository = "https://github.com/kowyo/mac-checkup"
+
+[project.scripts]
+mac-checkup = "mac_checkup:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mac_checkup"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"mac-checkup" = "mac_checkup/mac-checkup"
